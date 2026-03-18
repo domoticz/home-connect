@@ -32,6 +32,7 @@ class SSEThread(threading.Thread):
         self._stop_event = threading.Event()
         self._connected_once = False
         self.reconnect_delay = 10  # seconds, doubles on each failure up to 3600
+        self._response = None  # active streaming response, closed by stop()
 
     def run(self):
         while not self._stop_event.is_set():
@@ -64,6 +65,7 @@ class SSEThread(threading.Thread):
             stream=True,
             timeout=(10, 45),  # (connect_timeout, read_timeout)
         )
+        self._response = response
 
         try:
             if response.status_code == 401:
@@ -126,10 +128,11 @@ class SSEThread(threading.Thread):
                     event_type = None
                     data_lines = []
         finally:
+            self._response = None
             response.close()
 
     def stop(self):
-        """Signal the thread to stop. Returns immediately.
-        The thread will exit within the read timeout window (45s max).
-        """
+        """Signal the thread to stop and close the active connection immediately."""
         self._stop_event.set()
+        if self._response is not None:
+            self._response.close()

@@ -298,6 +298,7 @@ class BasePlugin:
     def onStop(self):
         if self.sse_thread is not None:
             self.sse_thread.stop()
+            self.sse_thread.join(timeout=5)
             self.sse_thread = None
         if self.callback_server is not None:
             try:
