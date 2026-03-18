@@ -42,7 +42,37 @@ Before you begin, make sure you have the following:
 
 ---
 
-## Step 1 — Set Up Port Forwarding and Determine Your Redirect URI
+## Step 1 — Install the Plugin
+
+1. **Clone the repository** into your Domoticz plugins directory:
+
+   ```bash
+   cd /home/pi/domoticz/plugins
+   git clone https://github.com/domoticz/home-connect.git HomeConnect
+   ```
+
+   On Windows, open a terminal in `C:\domoticz\plugins\` and run:
+   ```
+   git clone https://github.com/domoticz/home-connect.git HomeConnect
+   ```
+
+2. **Install the required Python library:**
+
+   ```bash
+   pip install -r /home/pi/domoticz/plugins/HomeConnect/requirements.txt
+   ```
+
+   > **Docker users:** The official Domoticz Docker image already includes all necessary Python libraries. You can skip this step.
+
+3. **Restart Domoticz** to detect the new plugin:
+
+   ```bash
+   sudo systemctl restart domoticz
+   ```
+
+---
+
+## Step 2 — Set Up Port Forwarding and Determine Your Redirect URI
 
 **Important:** Home Connect does not accept internal (LAN) IP addresses such as `192.168.x.x` or `127.0.0.1` as redirect URIs. The redirect URI you register must be reachable from the internet.
 
@@ -70,7 +100,7 @@ The port (`9500` by default) can be changed. If you change it, update both the D
 
 ---
 
-## Step 2 — Register a Developer Application
+## Step 3 — Register a Developer Application
 
 You need to register an OAuth application in the Home Connect developer portal to obtain API credentials.
 
@@ -90,7 +120,7 @@ You need to register an OAuth application in the Home Connect developer portal t
      Enable **"Use same credentials as developer account"**. This links the developer app to your real appliances.
 
    - **Redirect URI**
-     Enter the externally reachable URI you determined in Step 1, for example:
+     Enter the externally reachable URI you determined in Step 2, for example:
      ```
      http://myhome.duckdns.org:9500/callback
      ```
@@ -107,30 +137,6 @@ You need to register an OAuth application in the Home Connect developer portal t
 
 ---
 
-## Step 3 — Install the Plugin
-
-1. **Copy** the `HomeConnect` folder into your Domoticz plugins directory:
-
-   ```bash
-   cp -r HomeConnect /home/pi/domoticz/plugins/
-   ```
-
-   On Windows, copy to `C:\domoticz\plugins\HomeConnect\`.
-
-2. **Install the required Python library:**
-
-   ```bash
-   pip install -r /home/pi/domoticz/plugins/HomeConnect/requirements.txt
-   ```
-
-3. **Restart Domoticz** to detect the new plugin:
-
-   ```bash
-   sudo systemctl restart domoticz
-   ```
-
----
-
 ## Step 4 — Add Hardware in Domoticz
 
 1. In Domoticz, go to **Settings → Hardware**.
@@ -144,20 +150,20 @@ You need to register an OAuth application in the Home Connect developer portal t
      Select `Bosch Home Connect` from the dropdown.
 
    - **Client ID**
-     Paste the Client ID from Step 2.
+     Paste the Client ID from Step 3.
 
    - **Client Secret**
-     Paste the Client Secret from Step 2.
+     Paste the Client Secret from Step 3.
 
    - **OAuth Callback Host**
-     Enter the **externally reachable** hostname or IP address you determined in Step 1.
-     This must exactly match the host part of the redirect URI you registered in Step 2.
+     Enter the **externally reachable** hostname or IP address you determined in Step 2.
+     This must exactly match the host part of the redirect URI you registered in Step 3.
      Internal IP addresses such as `192.168.x.x` will not work — use your external IP or dynamic DNS hostname.
      Examples: `1.2.3.4`, `myhome.duckdns.org`.
 
    - **OAuth Callback Port**
      The port the plugin listens on for the OAuth callback. Default: `9500`.
-     Must match the port in the redirect URI registered in Step 2.
+     Must match the port in the redirect URI registered in Step 3.
 
    - **Debug**
      Leave as `Off` for normal use. See [Debug Modes](#debug-modes) for options.
@@ -250,7 +256,7 @@ Cache files are stored as `http_cache/GET_api_homeappliances.json` etc., named a
 |---------|--------------|----------|
 | Authorization URL keeps appearing in the log | Tokens not yet obtained | Complete Step 5 |
 | Browser shows `unauthorized_client` after login | Redirect URI mismatch | Ensure the URI in the developer portal exactly matches the OAuth Callback Host + Port in Domoticz (including `http://`, the IP, the port, and `/callback`) |
-| Home Connect returns `403 Forbidden` during login | Internal IP used as redirect URI | Home Connect rejects internal IPs (`192.168.x.x`, `127.0.0.1`). Use an external IP or dynamic DNS hostname and set up port forwarding (see Step 1) |
+| Home Connect returns `403 Forbidden` during login | Internal IP used as redirect URI | Home Connect rejects internal IPs (`192.168.x.x`, `127.0.0.1`). Use an external IP or dynamic DNS hostname and set up port forwarding (see Step 2) |
 | Browser redirected but page not loading | Port forwarding not set up or wrong host | Ensure port forwarding is configured on your router (external port 9500 → Domoticz LAN IP:9500) and that the OAuth Callback Host in Domoticz matches the registered redirect URI |
 | "Missing cache file" errors | Mode 4 selected but `http_cache/` is empty | Run with mode 3 first to capture real data, then switch to mode 4 |
 | Devices not updating | Appliance offline or remote control disabled | Check appliance connectivity in the Home Connect app |
