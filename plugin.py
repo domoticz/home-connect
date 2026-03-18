@@ -16,9 +16,6 @@
     <params>
         <param field="Mode1" label="Client ID" width="400px" required="true" default=""/>
         <param field="Mode2" label="Client Secret" width="400px" required="true" password="true" default=""/>
-        <param field="Mode3" label="Access Token (auto-filled)" width="400px" default=""/>
-        <param field="Mode4" label="Refresh Token (auto-filled)" width="400px" password="true" default=""/>
-        <param field="Mode5" label="Token Expiry Unix TS (auto-filled)" width="200px" default="0"/>
         <param field="Address" label="OAuth Callback Host (external IP or DynDNS, e.g. myhome.duckdns.org)" width="350px" required="true" default=""/>
         <param field="Port" label="OAuth Callback Port" width="80px" required="true" default="9500"/>
         <param field="Mode6" label="Debug Level" width="200px">
