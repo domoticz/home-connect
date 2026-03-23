@@ -94,6 +94,7 @@ class BasePlugin:
         self.sse_thread = None
         self._event_queue = queue.Queue()
         self._last_poll_time = 0.0
+        self._poll_interval = 60  # heartbeats; recalculated after discovery
 
     # ------------------------------------------------------------------
     # Appliance helpers
@@ -120,6 +121,7 @@ class BasePlugin:
         elif event_type == "CONNECTED":
             appliance = self._appliance_by_id(ha_id)
             if appliance:
+                appliance.connected = True
                 dev.update_switch(Devices, appliance.u(0), True)
                 if _effective_log_level(self.debug_mode) >= 1:
                     Domoticz.Log(f"HomeConnect: {appliance.name} connected.")
@@ -127,6 +129,7 @@ class BasePlugin:
         elif event_type == "DISCONNECTED":
             appliance = self._appliance_by_id(ha_id)
             if appliance:
+                appliance.connected = False
                 dev.update_switch(Devices, appliance.u(0), False)
                 if _effective_log_level(self.debug_mode) >= 1:
                     Domoticz.Log(f"HomeConnect: {appliance.name} disconnected.")
@@ -199,6 +202,7 @@ class BasePlugin:
                 debug_mode=self.debug_mode,
                 log_fn=Domoticz.Log,
             )
+            appliance.connected = bool(ha.get("connected", False))
             appliance.create_devices(Devices)
             self.appliances.append(appliance)
             if _effective_log_level(self.debug_mode) >= 1:
@@ -208,20 +212,41 @@ class BasePlugin:
                 )
 
         Domoticz.Log(f"HomeConnect: Discovered {len(self.appliances)} appliance(s).")
+        self._update_poll_interval()
         return ha_list
+
+    def _update_poll_interval(self):
+        """Recalculate the heartbeat poll interval based on appliance count.
+
+        Each poll cycle makes 2 API calls per appliance (status + settings).
+        Targeting 80% of the typical 1000 req/day limit (800 calls/day):
+          interval_seconds = 86400 * 2*N / 800 = 216*N
+        Clamped to [5 min, 60 min].
+        """
+        n = max(1, len(self.appliances))
+        interval_seconds = max(300, min(3600, 216 * n))
+        self._poll_interval = round(interval_seconds / 5)  # convert to heartbeats (5s each)
+        if _effective_log_level(self.debug_mode) >= 1:
+            Domoticz.Log(
+                f"HomeConnect: Poll interval set to {interval_seconds}s"
+                f" ({self._poll_interval} heartbeats) for {n} appliance(s)."
+            )
 
     def _poll_all(self, ha_list=None):
         """Poll status for all appliances.
-        Pass ha_list from _discover_appliances() to avoid a redundant API call.
+        Pass ha_list from _discover_appliances() to initialise connected state;
+        subsequent calls use the per-appliance connected flag kept current by SSE events.
         """
-        if ha_list is None:
-            resp = self.api.get("/api/homeappliances")
-            ha_list = resp.get("data", {}).get("homeappliances", [])
-        connected_map = {ha["haId"]: bool(ha.get("connected", False)) for ha in ha_list if ha.get("haId")}
+        if ha_list is not None:
+            for ha in ha_list:
+                ha_id = ha.get("haId")
+                if ha_id:
+                    appliance = self._appliance_by_id(ha_id)
+                    if appliance:
+                        appliance.connected = bool(ha.get("connected", False))
 
         for appliance in self.appliances:
-            connected = connected_map.get(appliance.ha_id, False)
-            appliance.poll(Devices, connected)
+            appliance.poll(Devices, appliance.connected)
 
         self._last_poll_time = time.time()
 
@@ -327,10 +352,10 @@ class BasePlugin:
         except queue.Empty:
             pass
 
-        # Poll every 60 heartbeats (5 minutes at 5s interval)
+        # Poll at a rate calculated from appliance count to stay within API limits
         if self.appliances:
             self.poll_counter += 1
-            if self.poll_counter >= 60:
+            if self.poll_counter >= self._poll_interval:
                 self.poll_counter = 0
                 self._poll_all()
 

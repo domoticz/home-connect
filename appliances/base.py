@@ -59,6 +59,7 @@ class BaseAppliance:
         self.api = api
         self.debug_mode = debug_mode
         self.log = log_fn
+        self.connected = False
         self._watts = 0.0
         self._total_wh = 0.0
 
