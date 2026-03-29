@@ -70,6 +70,9 @@ def _make_appliance(ha_id, name, appliance_type, unit_base, api, debug_mode, log
     )
 
 
+_RATE_LIMIT_SECS = 300  # minimum seconds between repeated discovery/poll calls
+
+
 def _effective_log_level(mode: int) -> int:
     """Return the effective logging verbosity for a given debug mode.
     Modes 3/4 are cache modes; treat them as log level 2 (Verbose).
@@ -94,6 +97,7 @@ class BasePlugin:
         self.sse_thread = None
         self._event_queue = queue.Queue()
         self._last_poll_time = 0.0
+        self._last_discovery_time = 0.0
         self._poll_interval = 60  # heartbeats; recalculated after discovery
 
     # ------------------------------------------------------------------
@@ -135,15 +139,21 @@ class BasePlugin:
                     Domoticz.Log(f"HomeConnect: {appliance.name} disconnected.")
 
         elif event_type in ("PAIRED", "DEPAIRED"):
-            if _effective_log_level(self.debug_mode) >= 1:
-                Domoticz.Log(f"HomeConnect: Appliance {event_type.lower()} - re-discovering.")
-            ha_list = self._discover_appliances()
-            self._poll_all(ha_list)
+            if time.time() - self._last_discovery_time >= _RATE_LIMIT_SECS:
+                if _effective_log_level(self.debug_mode) >= 1:
+                    Domoticz.Log(f"HomeConnect: Appliance {event_type.lower()} - re-discovering.")
+                ha_list = self._discover_appliances()
+                self._poll_all(ha_list)
+            else:
+                if _effective_log_level(self.debug_mode) >= 2:
+                    Domoticz.Log(
+                        f"HomeConnect: Appliance {event_type.lower()} - skipping re-discovery (discovered recently)."
+                    )
 
         elif event_type == "_RECONNECTED":
             # Full poll after reconnect to catch any missed state changes,
             # but rate-limited to once per 5 minutes to stay within API limits.
-            if time.time() - self._last_poll_time >= 300:
+            if time.time() - self._last_poll_time >= _RATE_LIMIT_SECS:
                 if _effective_log_level(self.debug_mode) >= 1:
                     Domoticz.Log("HomeConnect: SSE reconnected - polling all appliances.")
                 self._poll_all()
@@ -213,6 +223,7 @@ class BasePlugin:
 
         Domoticz.Log(f"HomeConnect: Discovered {len(self.appliances)} appliance(s).")
         self._update_poll_interval()
+        self._last_discovery_time = time.time()
         return ha_list
 
     def _update_poll_interval(self):
