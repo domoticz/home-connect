@@ -29,6 +29,8 @@
 </plugin>
 """
 
+import json
+import os
 import queue
 import time
 import urllib.parse
@@ -190,6 +192,20 @@ class BasePlugin:
         """
         resp = self.api.get("/api/homeappliances")
         ha_list = resp.get("data", {}).get("homeappliances", [])
+        using_cache = False
+        if not ha_list and self.api.rate_limited:
+            cached = self._load_appliance_cache()
+            if cached:
+                Domoticz.Log(
+                    "HomeConnect: Rate limited — loading appliances from cache."
+                )
+                ha_list = cached
+                using_cache = True
+            else:
+                Domoticz.Log(
+                    "HomeConnect: Rate limited and no appliance cache available."
+                )
+                return []
         if not ha_list:
             Domoticz.Log("HomeConnect: No appliances found.")
             return []
@@ -224,6 +240,8 @@ class BasePlugin:
         Domoticz.Log(f"HomeConnect: Discovered {len(self.appliances)} appliance(s).")
         self._update_poll_interval()
         self._last_discovery_time = time.time()
+        if not using_cache:
+            self._save_appliance_cache(ha_list)
         return ha_list
 
     def _update_poll_interval(self):
@@ -242,6 +260,31 @@ class BasePlugin:
                 f"HomeConnect: Poll interval set to {interval_seconds}s"
                 f" ({self._poll_interval} heartbeats) for {n} appliance(s)."
             )
+
+    def _appliance_cache_path(self):
+        return os.path.join(Parameters["HomeFolder"], "appliances_cache.json")
+
+    def _save_appliance_cache(self, ha_list):
+        path = self._appliance_cache_path()
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(ha_list, fh, indent=2)
+            os.replace(tmp, path)
+        except OSError as exc:
+            Domoticz.Log(f"HomeConnect: Failed to save appliance cache: {exc}")
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    def _load_appliance_cache(self):
+        path = self._appliance_cache_path()
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return []
 
     def _poll_all(self, ha_list=None):
         """Poll status for all appliances.

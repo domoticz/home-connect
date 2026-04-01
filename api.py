@@ -75,6 +75,7 @@ class HomeConnectAPI:
         self.debug_mode = debug_mode
         self.log = log_fn
         self.CACHE_DIR = os.path.join(home_folder, "http_cache")
+        self.rate_limited = False  # set True on HTTP 429, cleared on next success
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -172,8 +173,31 @@ class HomeConnectAPI:
             return {}
 
         if response.status_code == 429:
+            self.rate_limited = True
+            secs = None
+            retry_after = response.headers.get("Retry-After", "")
+            if retry_after:
+                try:
+                    secs = int(retry_after)
+                except ValueError:
+                    pass
+            if secs is None:
+                try:
+                    body = response.json()
+                    desc = body.get("error", {}).get("description", "")
+                    m = re.search(r"(\d+)\s*seconds", desc)
+                    if m:
+                        secs = int(m.group(1))
+                except Exception:
+                    pass
+            if secs is not None:
+                h, rem = divmod(secs, 3600)
+                mn, s = divmod(rem, 60)
+                wait_info = f" Retry after: {h:02d}:{mn:02d}:{s:02d}."
+            else:
+                wait_info = ""
             self.log(
-                f"HomeConnect: Rate limit exceeded (HTTP 429) for {method} {path}."
+                f"HomeConnect: Rate limit exceeded (HTTP 429) for {method} {path}.{wait_info}"
             )
             return {}
 
@@ -198,6 +222,7 @@ class HomeConnectAPI:
         if self.debug_mode == 3:
             self._write_to_cache(filename, data)
 
+        self.rate_limited = False
         return data
 
     def _load_from_cache(self, filename: str) -> dict:

@@ -101,6 +101,9 @@ class SSEThread(threading.Thread):
 
                 line = raw_line.strip() if raw_line else ""
 
+                if _effective_log_level(self.debug_mode) >= 2 and line:
+                    self.log(f"HomeConnect: SSE recv: {line[:300]}")
+
                 if line.startswith("event:"):
                     event_type = line[6:].strip()
                 elif line.startswith("data:"):
