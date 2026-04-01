@@ -5,7 +5,8 @@ api.py - REST API client for the Home Connect cloud API.
 Wraps the requests library with:
 - Automatic Bearer token injection via OAuthManager
 - HTTP 401 retry-once after token refresh
-- HTTP 429 rate-limit handling
+- HTTP 429 rate-limit handling with timed block (respects Retry-After / body countdown)
+- Consecutive-error backoff: self-imposed 10-min pause after 9 errors in 10 min
 - Debug mode 2: verbose request/response logging
 - Debug mode 3: write JSON responses to http_cache/ for later replay
 - Debug mode 4: read responses from http_cache/ instead of making network calls
@@ -17,6 +18,7 @@ outside of the Domoticz runtime.
 import json
 import os
 import re
+import time
 
 import requests
 
@@ -53,6 +55,11 @@ class HomeConnectAPI:
 
     BASE_URL = "https://api.home-connect.com"
 
+    # Bosch blocks after 10 consecutive errors in 10 min; we stop at 9.
+    _MAX_CONSEC_ERRORS = 9
+    _ERROR_WINDOW_SECS = 600   # 10 minutes
+    _ERROR_BLOCK_SECS  = 600   # self-imposed pause length
+
     def __init__(
         self,
         oauth: OAuthManager,
@@ -75,7 +82,13 @@ class HomeConnectAPI:
         self.debug_mode = debug_mode
         self.log = log_fn
         self.CACHE_DIR = os.path.join(home_folder, "http_cache")
-        self.rate_limited = False  # set True on HTTP 429, cleared on next success
+
+        # Rate-limit / error-block state
+        self.rate_limited = False       # True while either block is active
+        self._rate_limit_until = 0.0   # epoch: Bosch-imposed 429 block expiry
+        self._error_block_until = 0.0  # epoch: self-imposed consecutive-error block expiry
+        self._consec_errors = 0
+        self._first_error_time = 0.0
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -93,6 +106,10 @@ class HomeConnectAPI:
         """Perform a DELETE request and return parsed JSON."""
         return self._request("DELETE", path)
 
+    def blocked_until(self) -> float:
+        """Return the epoch timestamp until which all API calls are suppressed, or 0."""
+        return max(self._rate_limit_until, self._error_block_until)
+
     # ------------------------------------------------------------------
     # Core request dispatcher
     # ------------------------------------------------------------------
@@ -102,12 +119,26 @@ class HomeConnectAPI:
         Execute an API request honouring the current debug_mode.
 
         Returns a dict with the parsed JSON response, or {} on any error.
+        Calls are silently suppressed (returning {}) while a rate-limit or
+        error block is active.
         """
         filename = _url_to_filename(method, path)
 
         # ------ Offline / cache-read mode --------------------------------
         if self.debug_mode == 4:
             return self._load_from_cache(filename)
+
+        # ------ Block check ----------------------------------------------
+        now = time.time()
+        until = self.blocked_until()
+        if until > now:
+            self.rate_limited = True
+            if _effective_log_level(self.debug_mode) >= 2:
+                self.log(
+                    f"HomeConnect: Skipping {method} {path} — API blocked for "
+                    f"{int(until - now)}s more."
+                )
+            return {}
 
         # ------ Live request ---------------------------------------------
         url = self.BASE_URL + path
@@ -124,6 +155,31 @@ class HomeConnectAPI:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _track_error(self):
+        """Record a consecutive API error; self-impose a block if threshold is reached."""
+        now = time.time()
+        if self._consec_errors == 0:
+            self._first_error_time = now
+        self._consec_errors += 1
+        if (
+            self._consec_errors >= self._MAX_CONSEC_ERRORS
+            and (now - self._first_error_time) <= self._ERROR_WINDOW_SECS
+        ):
+            self._error_block_until = now + self._ERROR_BLOCK_SECS
+            self.rate_limited = True
+            self.log(
+                f"HomeConnect: {self._consec_errors} consecutive errors within 10 min "
+                f"— pausing API calls for 10 min to avoid Bosch block."
+            )
+            self._consec_errors = 0
+            self._first_error_time = 0.0
+
+    def _clear_errors(self):
+        """Reset consecutive-error state after a successful response."""
+        self.rate_limited = False
+        self._consec_errors = 0
+        self._first_error_time = 0.0
 
     def _do_http(
         self,
@@ -146,6 +202,7 @@ class HomeConnectAPI:
             )
         except requests.RequestException as exc:
             self.log(f"HomeConnect: Request error {method} {path}: {exc}")
+            self._track_error()
             return {}
 
         # Debug mode 2: verbose logging
@@ -174,6 +231,8 @@ class HomeConnectAPI:
 
         if response.status_code == 429:
             self.rate_limited = True
+            self._consec_errors = 0   # 429 is rate limiting, not an API error streak
+            self._first_error_time = 0.0
             secs = None
             retry_after = response.headers.get("Retry-After", "")
             if retry_after:
@@ -183,14 +242,15 @@ class HomeConnectAPI:
                     pass
             if secs is None:
                 try:
-                    body = response.json()
-                    desc = body.get("error", {}).get("description", "")
+                    err_body = response.json()
+                    desc = err_body.get("error", {}).get("description", "")
                     m = re.search(r"(\d+)\s*seconds", desc)
                     if m:
                         secs = int(m.group(1))
                 except Exception:
                     pass
             if secs is not None:
+                self._rate_limit_until = time.time() + secs
                 h, rem = divmod(secs, 3600)
                 mn, s = divmod(rem, 60)
                 wait_info = f" Retry after: {h:02d}:{mn:02d}:{s:02d}."
@@ -205,6 +265,7 @@ class HomeConnectAPI:
             self.log(
                 f"HomeConnect: HTTP error {response.status_code} for {method} {path}."
             )
+            self._track_error()
             return {}
 
         # Parse JSON
@@ -222,7 +283,7 @@ class HomeConnectAPI:
         if self.debug_mode == 3:
             self._write_to_cache(filename, data)
 
-        self.rate_limited = False
+        self._clear_errors()
         return data
 
     def _load_from_cache(self, filename: str) -> dict:

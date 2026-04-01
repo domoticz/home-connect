@@ -101,6 +101,7 @@ class BasePlugin:
         self._last_poll_time = 0.0
         self._last_discovery_time = 0.0
         self._poll_interval = 60  # heartbeats; recalculated after discovery
+        self._last_block_log_time = 0.0
 
     # ------------------------------------------------------------------
     # Appliance helpers
@@ -141,7 +142,12 @@ class BasePlugin:
                     Domoticz.Log(f"HomeConnect: {appliance.name} disconnected.")
 
         elif event_type in ("PAIRED", "DEPAIRED"):
-            if time.time() - self._last_discovery_time >= _RATE_LIMIT_SECS:
+            if self.api.blocked_until() > time.time():
+                if _effective_log_level(self.debug_mode) >= 1:
+                    Domoticz.Log(
+                        f"HomeConnect: Appliance {event_type.lower()} - skipping re-discovery (API blocked)."
+                    )
+            elif time.time() - self._last_discovery_time >= _RATE_LIMIT_SECS:
                 if _effective_log_level(self.debug_mode) >= 1:
                     Domoticz.Log(f"HomeConnect: Appliance {event_type.lower()} - re-discovering.")
                 ha_list = self._discover_appliances()
@@ -155,7 +161,10 @@ class BasePlugin:
         elif event_type == "_RECONNECTED":
             # Full poll after reconnect to catch any missed state changes,
             # but rate-limited to once per 5 minutes to stay within API limits.
-            if time.time() - self._last_poll_time >= _RATE_LIMIT_SECS:
+            if self.api.blocked_until() > time.time():
+                if _effective_log_level(self.debug_mode) >= 1:
+                    Domoticz.Log("HomeConnect: SSE reconnected - skipping poll (API blocked).")
+            elif time.time() - self._last_poll_time >= _RATE_LIMIT_SECS:
                 if _effective_log_level(self.debug_mode) >= 1:
                     Domoticz.Log("HomeConnect: SSE reconnected - polling all appliances.")
                 self._poll_all()
@@ -260,6 +269,19 @@ class BasePlugin:
                 f"HomeConnect: Poll interval set to {interval_seconds}s"
                 f" ({self._poll_interval} heartbeats) for {n} appliance(s)."
             )
+
+    def _log_block_remaining(self):
+        """Log how long the API block has remaining, at most once per hour."""
+        now = time.time()
+        if now - self._last_block_log_time < 3600:
+            return
+        remaining = int(self.api.blocked_until() - now)
+        h, rem = divmod(remaining, 3600)
+        mn, s = divmod(rem, 60)
+        Domoticz.Log(
+            f"HomeConnect: API blocked — {h:02d}:{mn:02d}:{s:02d} remaining before retry."
+        )
+        self._last_block_log_time = now
 
     def _appliance_cache_path(self):
         return os.path.join(Parameters["HomeFolder"], "appliances_cache.json")
@@ -406,12 +428,18 @@ class BasePlugin:
         except queue.Empty:
             pass
 
-        # Poll at a rate calculated from appliance count to stay within API limits
+        # Poll at a rate calculated from appliance count to stay within API limits.
+        # Skip entirely while the API is blocked; keep poll_counter at the threshold
+        # so polling fires on the first heartbeat after the block lifts.
         if self.appliances:
-            self.poll_counter += 1
-            if self.poll_counter >= self._poll_interval:
-                self.poll_counter = 0
-                self._poll_all()
+            if self.api.blocked_until() > time.time():
+                self._log_block_remaining()
+                self.poll_counter = self._poll_interval
+            else:
+                self.poll_counter += 1
+                if self.poll_counter >= self._poll_interval:
+                    self.poll_counter = 0
+                    self._poll_all()
 
     # ------------------------------------------------------------------
     # OAuth callback server handlers
