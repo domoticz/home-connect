@@ -1,3 +1,5 @@
 http_cache/*
 !http_cache/.gitkeep
 tokens.json
+appliances_cache.json
+rate_limit_block.json

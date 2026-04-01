@@ -82,6 +82,7 @@ class HomeConnectAPI:
         self.debug_mode = debug_mode
         self.log = log_fn
         self.CACHE_DIR = os.path.join(home_folder, "http_cache")
+        self._block_file = os.path.join(home_folder, "rate_limit_block.json")
 
         # Rate-limit / error-block state
         self.rate_limited = False       # True while either block is active
@@ -89,6 +90,9 @@ class HomeConnectAPI:
         self._error_block_until = 0.0  # epoch: self-imposed consecutive-error block expiry
         self._consec_errors = 0
         self._first_error_time = 0.0
+
+        # Restore a persisted 429 block from a previous run
+        self._load_rate_limit_block()
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -156,6 +160,42 @@ class HomeConnectAPI:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _save_rate_limit_block(self):
+        """Persist _rate_limit_until to disk so restarts honour the block."""
+        tmp = self._block_file + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"until": self._rate_limit_until}, fh)
+            os.replace(tmp, self._block_file)
+        except OSError:
+            pass
+
+    def _load_rate_limit_block(self):
+        """Restore a previously saved 429 block if it has not yet expired."""
+        try:
+            with open(self._block_file, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            until = float(data.get("until", 0))
+            if until > time.time():
+                self._rate_limit_until = until
+                self.rate_limited = True
+                remaining = int(until - time.time())
+                h, rem = divmod(remaining, 3600)
+                mn, s = divmod(rem, 60)
+                self.log(
+                    f"HomeConnect: Persisted API block restored — "
+                    f"{h:02d}:{mn:02d}:{s:02d} remaining before retry."
+                )
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+
+    def _delete_rate_limit_block(self):
+        """Remove the persisted block file once the block has lifted."""
+        try:
+            os.remove(self._block_file)
+        except OSError:
+            pass
+
     def _track_error(self):
         """Record a consecutive API error; self-impose a block if threshold is reached."""
         now = time.time()
@@ -180,6 +220,7 @@ class HomeConnectAPI:
         self.rate_limited = False
         self._consec_errors = 0
         self._first_error_time = 0.0
+        self._delete_rate_limit_block()
 
     def _do_http(
         self,
@@ -251,6 +292,7 @@ class HomeConnectAPI:
                     pass
             if secs is not None:
                 self._rate_limit_until = time.time() + secs
+                self._save_rate_limit_block()
                 h, rem = divmod(secs, 3600)
                 mn, s = divmod(rem, 60)
                 wait_info = f" Retry after: {h:02d}:{mn:02d}:{s:02d}."
