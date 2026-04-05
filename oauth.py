@@ -35,7 +35,7 @@ class OAuthManager:
     TOKEN_PATH = "/security/oauth/token"
     SCOPES = (
         "IdentifyAppliance Washer Dryer Dishwasher Oven "
-        "CoffeeMaker Hood CleaningRobot Refrigerator FridgeFreezer Freezer"
+        "CoffeeMaker Hood CleaningRobot Refrigerator Freezer"
     )
 
     def __init__(
