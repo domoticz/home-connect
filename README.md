@@ -117,7 +117,7 @@ You need to register an OAuth application in the Home Connect developer portal t
      Select `Authorization Code Grant`.
 
    - **Home Connect User Account**
-     Enable **"Use same credentials as developer account"**. This links the developer app to your real appliances.
+     Leave this field blank, to link this new application to the account specified in your profile. This links the developer app to your real appliances.
 
    - **Redirect URI**
      Enter the externally reachable URI you determined in Step 2, for example:
