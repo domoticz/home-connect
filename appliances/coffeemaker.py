@@ -13,7 +13,7 @@ OFFSET_COFFEE_COUNT = 9
 OFFSET_HOTWATER_COUNT = 10
 
 _BEAN_NAMES  = ["VeryMild", "Mild", "Normal", "Strong", "VeryStrong", "ExtraStrong"]
-_TEMP_NAMES  = ["88°C", "90°C", "92°C", "94°C", "95°C", "97°C"]
+_TEMP_NAMES  = ["88Â°C", "90Â°C", "92Â°C", "94Â°C", "95Â°C", "97Â°C"]
 _TEMP_SUFFIXES = ["88C", "90C", "92C", "94C", "95C", "97C"]
 
 _BEAN_LEVELS = {n: i * 10 for i, n in enumerate(_BEAN_NAMES)}
@@ -24,6 +24,29 @@ _TEMP_PREFIX = "ConsumerProducts.CoffeeMaker.EnumType.CoffeeTemperature."
 
 _BEAN_API = {i * 10: n for i, n in enumerate(_BEAN_NAMES)}
 _TEMP_API = {i * 10: s for i, s in enumerate(_TEMP_SUFFIXES)}
+
+_COFFEE_ALERT_EVENTS = {
+    "BSH.Common.Event.ProgramFinished": ("Beverage ready.", 1),
+    "ConsumerProducts.CoffeeMaker.Event.BeanContainerEmpty": ("Bean container empty.", 3),
+    "ConsumerProducts.CoffeeMaker.Event.WaterTankEmpty": ("Water tank empty.", 3),
+    "ConsumerProducts.CoffeeMaker.Event.DripTrayFull": ("Drip tray full.", 3),
+    "ConsumerProducts.CoffeeMaker.Event.DescalingNecessary": ("Descaling necessary.", 2),
+}
+
+_ACTION_REQUIRED_ALERT_KEYS = frozenset({
+    "ConsumerProducts.CoffeeMaker.Event.BeanContainerEmpty",
+    "ConsumerProducts.CoffeeMaker.Event.WaterTankEmpty",
+    "ConsumerProducts.CoffeeMaker.Event.DripTrayFull",
+})
+_ACTION_REQUIRED_CLEAR_STATES = frozenset({"Ready", "Inactive", "Running"})
+
+
+def _event_is_present(value):
+    if isinstance(value, bool):
+        return value
+    short = str(value).rsplit(".", 1)[-1].strip().lower()
+    return short in ("present", "true", "1", "on")
+
 
 
 class CoffeeMakerAppliance(BaseAppliance):
@@ -47,6 +70,18 @@ class CoffeeMakerAppliance(BaseAppliance):
         except Exception as exc:
             self.log(f"HomeConnect: Could not fetch programs for {self.name}: {exc}")
             self._programs = []
+
+    def _clear_action_required_alerts(self, domoticz_devices):
+        """Home Connect doesn't reliably send an explicit "resolved" event for
+        action-required conditions (empty tank/bean container, full drip tray) -
+        the appliance just starts running again once they're fixed. So clear our
+        tracked state for them here whenever OperationState returns to
+        Ready/Inactive/Running, instead of waiting for an event that may never come.
+        """
+        for key in _ACTION_REQUIRED_ALERT_KEYS:
+            if key in self._active_alerts:
+                message, level = _COFFEE_ALERT_EVENTS[key]
+                self._set_alert_state(domoticz_devices, key, False, message, level)
 
     def create_devices(self, domoticz_devices):
         super().create_devices(domoticz_devices)
@@ -86,20 +121,16 @@ class CoffeeMakerAppliance(BaseAppliance):
         elif key == "ConsumerProducts.CoffeeMaker.Status.BeverageCounterHotWater":
             dev.update_custom(domoticz_devices, self.u(OFFSET_HOTWATER_COUNT), value)
 
-        elif key == "BSH.Common.Event.ProgramFinished":
-            self._alert(domoticz_devices, "Beverage ready.", level=1)
+        elif key in _COFFEE_ALERT_EVENTS:
+            message, level = _COFFEE_ALERT_EVENTS[key]
+            active = _event_is_present(value)
+            self._set_alert_state(domoticz_devices, key, active, message, level)
 
-        elif key == "ConsumerProducts.CoffeeMaker.Event.BeanContainerEmpty":
-            self._alert(domoticz_devices, "Bean container empty.", level=3)
-
-        elif key == "ConsumerProducts.CoffeeMaker.Event.WaterTankEmpty":
-            self._alert(domoticz_devices, "Water tank empty.", level=3)
-
-        elif key == "ConsumerProducts.CoffeeMaker.Event.DripTrayFull":
-            self._alert(domoticz_devices, "Drip tray full.", level=3)
-
-        elif key == "ConsumerProducts.CoffeeMaker.Event.DescalingNecessary":
-            self._alert(domoticz_devices, "Descaling necessary.", level=2)
+        elif key == "BSH.Common.Status.OperationState":
+            super()._handle_status_key(domoticz_devices, key, value)
+            state = str(value).rsplit(".", 1)[-1]
+            if state in _ACTION_REQUIRED_CLEAR_STATES:
+                self._clear_action_required_alerts(domoticz_devices)
 
         else:
             super()._handle_status_key(domoticz_devices, key, value)

@@ -3,3 +3,5 @@ http_cache/*
 tokens.json
 appliances_cache.json
 rate_limit_block.json
+__pycache__/
+*.pyc

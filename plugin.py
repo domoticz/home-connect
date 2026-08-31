@@ -32,6 +32,7 @@
 import json
 import os
 import queue
+import threading
 import time
 import urllib.parse
 
@@ -158,6 +159,9 @@ class BasePlugin:
                         f"HomeConnect: Appliance {event_type.lower()} - skipping re-discovery (discovered recently)."
                     )
 
+        elif event_type == "_STARTUP_DONE":
+            self._apply_startup_result(payload)
+
         elif event_type == "_RECONNECTED":
             # Full poll after reconnect to catch any missed state changes,
             # but rate-limited to once per 5 minutes to stay within API limits.
@@ -253,6 +257,101 @@ class BasePlugin:
             self._save_appliance_cache(ha_list)
         return ha_list
 
+    def _run_startup_discovery(self):
+        """Background thread: fetch appliance list + initial status/settings from the
+        Home Connect API. Runs off the main thread so a plugin (re)start never blocks
+        Domoticz on the underlying HTTP calls. Only network I/O happens here; touching
+        Devices happens back on the main thread via _apply_startup_result()."""
+        try:
+            resp = self.api.get("/api/homeappliances")
+            ha_list = resp.get("data", {}).get("homeappliances", [])
+            using_cache = False
+            if not ha_list and self.api.rate_limited:
+                cached = self._load_appliance_cache()
+                if cached:
+                    Domoticz.Log("HomeConnect: Rate limited — loading appliances from cache.")
+                    ha_list = cached
+                    using_cache = True
+                else:
+                    Domoticz.Log("HomeConnect: Rate limited and no appliance cache available.")
+
+            results = []
+            for i, ha in enumerate(ha_list):
+                ha_id = ha.get("haId")
+                if not ha_id:
+                    Domoticz.Log(f"HomeConnect: Skipping appliance at index {i} - missing haId.")
+                    continue
+                unit_base = i * 20 + 1
+                raw_name = ha.get("name", ha_id)
+                name = raw_name[13:].strip() if raw_name.startswith("Home Connect ") else raw_name
+                appliance = _make_appliance(
+                    ha_id=ha_id,
+                    name=name,
+                    appliance_type=ha.get("type", "Unknown"),
+                    unit_base=unit_base,
+                    api=self.api,
+                    debug_mode=self.debug_mode,
+                    log_fn=Domoticz.Log,
+                )
+                appliance.connected = bool(ha.get("connected", False))
+
+                status_list = []
+                settings_list = []
+                if appliance.connected:
+                    status_resp = self.api.get(f"/api/homeappliances/{ha_id}/status")
+                    status_list = status_resp.get("data", {}).get("status", [])
+                    settings_resp = self.api.get(f"/api/homeappliances/{ha_id}/settings")
+                    settings_list = settings_resp.get("data", {}).get("settings", [])
+
+                results.append({
+                    "appliance": appliance,
+                    "ha": ha,
+                    "status_list": status_list,
+                    "settings_list": settings_list,
+                })
+
+            if ha_list and not using_cache:
+                self._save_appliance_cache(ha_list)
+
+            self._event_queue.put(("_STARTUP_DONE", {"results": results}))
+        except Exception as exc:
+            Domoticz.Log(f"HomeConnect: Startup discovery failed: {exc}")
+            self._event_queue.put(("_STARTUP_DONE", {"results": []}))
+
+    def _start_startup_discovery(self):
+        """Kick off _run_startup_discovery() on a background thread."""
+        threading.Thread(
+            target=self._run_startup_discovery, name="HomeConnect-Startup", daemon=True
+        ).start()
+
+    def _apply_startup_result(self, payload):
+        """Main-thread handler for the _STARTUP_DONE event: creates/updates Devices
+        from the data _run_startup_discovery() fetched in the background, then starts SSE."""
+        results = payload.get("results", [])
+
+        self.appliances = []
+        for entry in results:
+            appliance = entry["appliance"]
+            appliance.create_devices(Devices)
+            self.appliances.append(appliance)
+            if _effective_log_level(self.debug_mode) >= 1:
+                Domoticz.Log(
+                    f"HomeConnect: Discovered {appliance.appliance_type} '{appliance.name}'"
+                    f" (units {appliance.unit_base}-{appliance.unit_base + 19})"
+                )
+            dev.update_switch(Devices, appliance.u(0), appliance.connected)
+            if appliance.connected:
+                if entry["status_list"]:
+                    appliance.update_from_status(Devices, entry["status_list"])
+                if entry["settings_list"]:
+                    appliance.update_from_status(Devices, entry["settings_list"])
+
+        Domoticz.Log(f"HomeConnect: Discovered {len(self.appliances)} appliance(s).")
+        self._update_poll_interval()
+        self._last_discovery_time = time.time()
+        self._last_poll_time = time.time()
+        self._start_sse()
+
     def _update_poll_interval(self):
         """Recalculate the heartbeat poll interval based on appliance count.
 
@@ -331,6 +430,7 @@ class BasePlugin:
     # ------------------------------------------------------------------
 
     def onStart(self):
+        start = time.time()
         # Read and apply debug level
         self.debug_mode = int(Parameters["Mode6"])
         if _effective_log_level(self.debug_mode) >= 1:
@@ -380,9 +480,7 @@ class BasePlugin:
 
         if self.oauth.is_authorized():
             Domoticz.Log("HomeConnect: Already authorized, ready.")
-            ha_list = self._discover_appliances()
-            self._poll_all(ha_list)
-            self._start_sse()
+            self._start_startup_discovery()
         else:
             # Start local HTTP callback server to receive the OAuth redirect
             self.callback_server = Domoticz.Connection(
@@ -395,11 +493,17 @@ class BasePlugin:
             Domoticz.Log(
                 f"HomeConnect: Please authorize at: {self.oauth.get_auth_url()}"
             )
+        Domoticz.Log(f"HomeConnect: onStart() returned after {time.time() - start:.2f}s.")
 
     def onStop(self):
+        start = time.time()
         if self.sse_thread is not None:
+            # stop() closes the active connection, which unblocks the thread's
+            # blocking read almost immediately. It's a daemon thread, so there's
+            # no need to wait around for it to actually finish before returning -
+            # it will be torn down with the process if this is a full restart,
+            # and _start_sse() replaces the reference on the next onStart anyway.
             self.sse_thread.stop()
-            self.sse_thread.join(timeout=5)
             self.sse_thread = None
         if self.callback_server is not None:
             try:
@@ -407,7 +511,7 @@ class BasePlugin:
             except Exception:
                 pass
             self.callback_server = None
-        Domoticz.Log("HomeConnect: Plugin stopped.")
+        Domoticz.Log(f"HomeConnect: Plugin stopped ({time.time() - start:.2f}s).")
 
     def onHeartbeat(self):
         if self.oauth is None:
@@ -475,9 +579,7 @@ class BasePlugin:
                 success = self.oauth.exchange_code(code)
                 if success:
                     Domoticz.Log("HomeConnect: Authorization successful.")
-                    ha_list = self._discover_appliances()
-                    self._poll_all(ha_list)
-                    self._start_sse()
+                    self._start_startup_discovery()
                 else:
                     Domoticz.Error(
                         "HomeConnect: Token exchange failed. Check log and try again."

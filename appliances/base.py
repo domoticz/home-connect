@@ -63,6 +63,9 @@ class BaseAppliance:
         self._watts = 0.0
         self._total_wh = 0.0
         self._operation_state = ""
+        self._last_alert_message = ""
+        self._last_alert_level = None
+        self._active_alerts = {}
 
     def u(self, offset):
         """Return the Domoticz unit number for a given offset."""
@@ -70,10 +73,29 @@ class BaseAppliance:
 
     def _alert(self, domoticz_devices, message, level=4):
         """Update the Alert sensor device and log the message.
+        Skips the update if the message is identical to the last alert (deduplication).
         level: 0=grey, 1=green, 2=yellow, 3=orange, 4=red (default).
         """
+        if self._last_alert_message == message and self._last_alert_level == level:
+            return
+        self._last_alert_message = message
+        self._last_alert_level = level
         dev.update_alert(domoticz_devices, self.u(OFFSET_ALERT), level, message)
         self.log(f"HomeConnect: {self.name} - {message}")
+
+    def _set_alert_state(self, domoticz_devices, alert_key, active, message, level):
+        """Track one alert event and show the highest active alert, or clear it."""
+        if active:
+            self._active_alerts[alert_key] = (level, message)
+        else:
+            self._active_alerts.pop(alert_key, None)
+
+        if self._active_alerts:
+            level, message = max(self._active_alerts.values(), key=lambda item: item[0])
+        else:
+            level, message = 1, "No active alerts."
+
+        self._alert(domoticz_devices, message, level)
 
     def create_devices(self, domoticz_devices):
         """Create all base devices for this appliance. Call super() first in subclasses."""
@@ -188,6 +210,15 @@ class BaseAppliance:
                           "value": f"BSH.Common.EnumType.PowerState.{state}"}},
             )
 
+    def poll_status(self, domoticz_devices):
+        """Poll current status from the API and update devices."""
+        resp = self.api.get(f"/api/homeappliances/{self.ha_id}/status")
+        status_list = resp.get("data", {}).get("status", [])
+        if status_list:
+            self.update_from_status(domoticz_devices, status_list)
+        elif _effective_log_level(self.debug_mode) >= 2:
+            self.log(f"HomeConnect: No status items for {self.name}.")
+
     def poll(self, domoticz_devices, connected: bool):
         """Poll current status and settings from the API and update devices."""
         dev.update_switch(domoticz_devices, self.u(OFFSET_CONNECTION), connected)
@@ -195,13 +226,7 @@ class BaseAppliance:
         if not connected:
             return
 
-        # Status endpoint: OperationState, DoorState, RemoteControlActive, etc.
-        resp = self.api.get(f"/api/homeappliances/{self.ha_id}/status")
-        status_list = resp.get("data", {}).get("status", [])
-        if status_list:
-            self.update_from_status(domoticz_devices, status_list)
-        elif _effective_log_level(self.debug_mode) >= 2:
-            self.log(f"HomeConnect: No status items for {self.name}.")
+        self.poll_status(domoticz_devices)
 
         # Settings endpoint: PowerState, ChildLock, etc.
         resp = self.api.get(f"/api/homeappliances/{self.ha_id}/settings")
